@@ -47,6 +47,15 @@ make -C mods/windowed-mode
 
 Built `.asi` files are written into each mod's directory and are git-ignored.
 
+## Releases
+
+Publishing a GitHub release triggers a CI workflow
+([`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)) that
+cross-compiles every mod and attaches the built `.asi` files to the release as
+downloadable assets. The workflow can also be run manually via *Actions →
+Build and attach ASI mods to release → Run workflow*, which uploads the binaries
+as a build artifact without needing a release.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

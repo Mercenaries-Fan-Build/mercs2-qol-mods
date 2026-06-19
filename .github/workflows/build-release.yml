@@ -1,0 +1,43 @@
+name: Build and attach ASI mods to release
+
+on:
+  release:
+    types: [published]
+  # Allow manual builds for testing without publishing a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install 32-bit MinGW cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-i686
+
+      - name: Build all mods
+        run: make
+
+      - name: Collect built .asi files
+        run: |
+          mkdir -p dist
+          cp mods/*/*.asi dist/
+          ls -la dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: asi-mods
+          path: dist/*.asi
+
+      - name: Attach .asi files to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.asi
