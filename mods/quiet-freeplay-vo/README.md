@@ -18,9 +18,17 @@ lives in Lua and isn't visible at the native call, so this mod discriminates by 
 **cue-name string**: a cue is only acted on if its name starts with one of the
 configured `prefixes`.
 
-The mod redirects the `VO.Cue` / `VO.CueWithoutSubtitles` function pointers in the
-engine's `.rdata` registration table (the same technique as `tools/lua_enum_asi` and
-`tools/net_hooks_asi`), saving the originals so non-matching cues pass straight through.
+Built on the [`m2` mod stdlib](../../sdk/):
+
+- **MinHook `.text` detours** on `VO.Cue` / `VO.CueWithoutSubtitles` (`m2_hook`). This
+  is SecuROM-safe — unlike a `.rdata` registration-slot patch, which is confirmed to
+  trip anti-tamper and crash early init. MinHook's trampoline is the pass-through path
+  for non-matching cues, and a code detour intercepts every call regardless of when the
+  binding was registered (no startup-timing guesswork).
+- **Armed by a load-progress trigger** (`m2_loadtrigger`). The detour is dormant — all
+  VO passes through — until the world load reaches `arm_phase` (default "WORLD LOAD
+  START"), so the shell and menus are never touched. The trigger reuses loadprobe's
+  world-load ladder as its milestone vocabulary.
 
 ## Configuration — `quiet_freeplay_vo.ini`
 
@@ -29,6 +37,7 @@ engine's `.rdata` registration table (the same technique as `tools/lua_enum_asi`
 | `mode` | `off` (observe only) · `throttle` (one cue per interval, default) · `silence` (drop all matching) |
 | `throttle_seconds` | Minimum gap between allowed cues in `throttle` mode (default `900` = 15 min) |
 | `log_all_cues` | `1` to log every cue name the game tries to play (default on) — use this to tune `prefixes` |
+| `arm_phase` | loadprobe ladder phase at which filtering activates (default `10` = WORLD LOAD START; `11` = Player spawn) |
 | `prefixes` | Comma/semicolon-separated cue-name prefixes that define the freeplay class |
 
 ## Tuning on your build
@@ -54,13 +63,11 @@ Copy **both** `quiet_freeplay_vo.asi` and `quiet_freeplay_vo.ini` into `<game>/s
 ## Compatibility / status
 
 Targets the cracked retail EXE (`53,482,288` bytes, image base `0x00400000`); the
-section VAs and the documented `VO.Cue` @ `0x005E9DE0` /
-`VO.CueWithoutSubtitles` @ `0x005E9F40` are binary-specific. The reg-slot resolution is
-dynamic (validated against sibling `VO.*` entries) and cross-checks those documented
-addresses in the log.
+`VO.Cue` @ `0x005E9DE0` / `VO.CueWithoutSubtitles` @ `0x005E9F40` addresses and the log
+stub the trigger watches are binary-specific (defined in [`sdk/m2/m2_target.h`](../../sdk/m2/m2_target.h)).
 
-> Not yet verified on a running game — the build is clean and the technique mirrors the
-> working `net_hooks`/`lua_enum` plugins, but confirm against `quiet_freeplay_vo.log` on
-> first run. If `VO.Cue` resolves but cues are never suppressed, the engine may cache the
-> binding closure before the hook installs; see the source header for the live-closure /
-> trampoline alternatives.
+> Not yet verified on a running game — the build is clean and every primitive (MinHook
+> `.text` detours, the log-stub capture, the Lua-stack readers) is ported from the
+> working `pmc_bb` plugin. Confirm against `quiet_freeplay_vo.log` on first run: it logs
+> whether each VO hook attached, when it armed (and at which phase), and every cue it
+> sees. If cues are listed but the wrong ones match, tune `prefixes`.

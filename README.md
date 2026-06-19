@@ -4,7 +4,15 @@ A collection of quality-of-life mods for **Mercenaries 2: World in Flames** (PC)
 
 These are lightweight `.asi` plugins — DLLs loaded into the game at startup by an
 [ASI loader](#installation). Each mod lives in its own directory under [`mods/`](mods/)
-and builds independently.
+and builds independently against a shared mod stdlib.
+
+## Layout
+
+- [`mods/`](mods/) — the mods, one directory each
+- [`sdk/`](sdk/) — **`m2`, the Mercenaries 2 mod stdlib**: logging, INI, SecuROM-safe
+  MinHook detours, safe Lua-stack reads, a shared hook on the game's log stream, and
+  load-progress triggers keyed to loadprobe's world-load ladder. Mods `#include <m2.h>`
+  and link it via [`sdk/sdk.mk`](sdk/sdk.mk). See the [SDK README](sdk/README.md).
 
 ## Mods
 
@@ -47,6 +55,17 @@ make -C mods/windowed-mode
 ```
 
 Built `.asi` files are written into each mod's directory and are git-ignored.
+
+### Updating the world-load ladder
+
+`sdk/m2/load_ladder.gen.h` is generated from loadprobe's `phases.rs` (the single source
+of truth for load milestones) and committed so mods build without the loadprobe checkout.
+When loadprobe's ladder changes, regenerate and verify:
+
+```sh
+make -C sdk ladder        # regenerate from the sibling ../mercenaries-game checkout
+make -C sdk ladder-check  # drift guard
+```
 
 ## Releases
 
