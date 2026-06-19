@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "slug": "quiet-freeplay-vo",
+  "name": "Quiet Freeplay VO",
+  "version": "0.1.0",
+  "kind": "asi",
+  "description": "Mutes or throttles the idle \"nag\" and proximity/POI voice-over; leaves mission dialog alone. Configurable via quiet_freeplay_vo.ini.",
+  "assets": ["quiet_freeplay_vo.asi", "quiet_freeplay_vo.ini"]
+}

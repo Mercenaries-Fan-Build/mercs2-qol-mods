@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "Mercenaries 2 QoL Mods",
+  "maintainer": "Mercenaries Fan Build",
+  "url": "https://github.com/Mercenaries-Fan-Build/mercs2-qol-mods",
+  "description": "Quality-of-life ASI mods for Mercenaries 2: World in Flames.",
+  "mods": ["windowed-mode", "quiet-freeplay-vo"]
+}
