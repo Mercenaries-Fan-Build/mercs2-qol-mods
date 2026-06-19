@@ -11,6 +11,7 @@ and builds independently.
 | Mod | Description |
 | --- | --- |
 | [windowed-mode](mods/windowed-mode/) | Forces D3D9 windowed mode (min 1280×720) by hooking `IDirect3D9::CreateDevice`. |
+| [quiet-freeplay-vo](mods/quiet-freeplay-vo/) | Mutes or throttles the idle "nag" and proximity/POI voice-over (configurable via `.ini`); leaves mission dialog alone. |
 
 ## Installation
 
