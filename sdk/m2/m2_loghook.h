@@ -1,10 +1,15 @@
 /* m2_loghook.h — shared subscription to the game's log stream.
  *
- * MinHooks the shared no-op log stub (M2_LOG_STUB_VA): every Lua print /
- * Debug.Printf / stripped subsystem log line funnels through it. Each line's
- * string arguments are joined into a message and dispatched to all registered
- * listeners. This is the SDK's single event source for "what did the game just
- * say" — m2_loadtrigger is built on top of it, and mods can listen directly.
+ * The SDK's single event source for "what did the game just say"; m2_loadtrigger
+ * is built on it and mods can listen directly.
+ *
+ * Source selection (see m2_loghook_install):
+ *   - If pmc_bb.dll is loaded, it already owns the log-stub hook and writes every
+ *     line to pmc_blackbox.log — we TAIL that file (pure consumer; we never touch
+ *     the stub, so we can't shadow pmc_bb's logger).
+ *   - Otherwise we MinHook the shared no-op log stub (M2_LOG_STUB_VA) ourselves,
+ *     chaining the trampoline. Every Lua print / Debug.Printf / stripped subsystem
+ *     log line funnels through it; string args are joined into a message.
  */
 #ifndef M2_LOGHOOK_H
 #define M2_LOGHOOK_H
