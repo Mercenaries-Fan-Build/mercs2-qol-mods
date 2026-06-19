@@ -24,20 +24,21 @@ jobs:
       - name: Build all mods
         run: make
 
-      - name: Collect built .asi files
+      - name: Collect built .asi files (and any companion .ini configs)
         run: |
           mkdir -p dist
           cp mods/*/*.asi dist/
+          cp mods/*/*.ini dist/ 2>/dev/null || true
           ls -la dist
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: asi-mods
-          path: dist/*.asi
+          path: dist/*
 
       - name: Attach .asi files to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.asi
+          files: dist/*
