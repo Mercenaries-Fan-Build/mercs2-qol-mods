@@ -23,10 +23,24 @@ and builds independently against a shared mod stdlib.
 
 ## Installation
 
-1. Install an ASI loader (e.g. [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader))
-   into the game directory.
-2. Drop the built `.asi` file into `<game>/scripts/`.
+These plugins are loaded by **`pmc_bb.dll`** — the Mercenaries Fan Build loader. It
+bundles a SecuROM spoof, a debug console, and a built-in ASI loader (adapted from
+[Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)'s code).
+
+> **Ultimate ASI Loader itself is _not_ compatible** with Mercenaries 2 — don't drop a
+> `dinput8.dll`/`dsound.dll` proxy in. The game loads `pmc_bb.dll` directly (its import
+> table references it by ordinal), so the loader has to be `pmc_bb.dll`.
+
+1. Get `pmc_bb.dll` into your game folder (next to `Mercenaries2.exe`). Easiest via the
+   [mercs2-modkit](https://github.com/Mercenaries-Fan-Build/mercs2-modkit) **Setup** tab,
+   which downloads it for you; or grab `pmc_bb.dll` from the
+   [pmc-blackbox releases](https://github.com/Mercenaries-Fan-Build/pmc-blackbox/releases)
+   and drop it in the game root.
+2. Drop the mod's `.asi` (and its `.ini`, if any) into `<game>/scripts/`.
 3. Launch the game.
+
+Or skip the manual steps and install these from the modkit catalog (Browse → Download →
+Enable → Deploy), which handles loader, placement, and updates.
 
 Each mod writes a `<mod>.log` next to itself for troubleshooting.
 
