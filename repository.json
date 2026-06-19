@@ -4,5 +4,22 @@
   "maintainer": "Mercenaries Fan Build",
   "url": "https://github.com/Mercenaries-Fan-Build/mercs2-qol-mods",
   "description": "Quality-of-life ASI mods for Mercenaries 2: World in Flames.",
-  "mods": ["windowed-mode", "quiet-freeplay-vo"]
+  "mods": [
+    {
+      "slug": "windowed-mode",
+      "name": "Windowed Mode",
+      "type": "asi",
+      "description": "Forces D3D9 windowed mode (min 1280x720) by hooking IDirect3D9::CreateDevice.",
+      "version": "0.1.0",
+      "assets": ["windowed_mode.asi"]
+    },
+    {
+      "slug": "quiet-freeplay-vo",
+      "name": "Quiet Freeplay VO",
+      "type": "asi",
+      "description": "Mutes or throttles the idle \"nag\" and proximity/POI voice-over; leaves mission dialog alone. Configurable via quiet_freeplay_vo.ini.",
+      "version": "0.1.0",
+      "assets": ["quiet_freeplay_vo.asi", "quiet_freeplay_vo.ini"]
+    }
+  ]
 }
