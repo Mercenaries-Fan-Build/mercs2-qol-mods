@@ -1,0 +1,37 @@
+name: CI
+
+# Build every mod on PRs and pushes to main so compiler/integration errors
+# are caught before merge (the release workflow only runs on publish).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install 32-bit MinGW cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-i686
+
+      - name: Build all mods
+        run: make
+
+      - name: Verify each mod produced an .asi
+        run: |
+          set -e
+          for d in mods/*/; do
+            asi=$(ls "$d"*.asi 2>/dev/null || true)
+            if [ -z "$asi" ]; then
+              echo "::error::no .asi built in $d"; exit 1
+            fi
+            echo "OK: $asi ($(wc -c < "$asi") bytes)"
+          done

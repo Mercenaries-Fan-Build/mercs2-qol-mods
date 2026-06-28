@@ -71,6 +71,10 @@ make -C mods/windowed-mode
 
 Built `.asi` files are written into each mod's directory and are git-ignored.
 
+Every push to `main` and every pull request is built by CI
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), which runs `make`
+across all mods and fails if any mod doesn't produce an `.asi`.
+
 ### Updating the world-load ladder
 
 `sdk/m2/load_ladder.gen.h` is generated from loadprobe's `phases.rs` (the single source
