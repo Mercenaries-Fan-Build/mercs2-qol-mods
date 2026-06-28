@@ -131,7 +131,7 @@ static const BYTE kFeslCAKeyPayload[128] = {
 
 static char g_server_ip[64]  = "refesl.live";  /* overridden by INI */
 static int  g_spoof_clock    = 1;              /* overridden by INI */
-static int  g_ca_key_patch   = 0;              /* overridden by INI; off = server presents a game-trusted cert */
+static int  g_ca_key_patch   = 1;              /* overridden by INI; required: game's FESL OpenSSL validates against a baked-in CA key */
 static HMODULE g_hModule     = NULL;
 
 /* ------------------------------------------------------------------------ *
@@ -421,15 +421,16 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         m2_logf("[*] clock spoof disabled by config");
     }
 
-    /* 4. FESL CA pubkey patch (opt-in). Only needed when the server
-     *    presents a self-signed cert the game's pinned CA won't trust.
-     *    Off by default: a server presenting a game-trusted cert (e.g. the
-     *    genuine EA FESL cert via an stunnel terminator) validates natively,
-     *    and overwriting the pinned CA would break that. */
+    /* 4. FESL CA pubkey patch. Required for the FESL TLS handshake: the
+     *    game's statically-linked OpenSSL validates the server cert against
+     *    a CA key baked into .rdata (not WinVerifyTrust), and on the cracked
+     *    EXE that key isn't EA's — so even the genuine cert fails without
+     *    this. Verified live: handshake resets with it off, completes with
+     *    it on. On by default; disable only for a custom CA + key payload. */
     if (g_ca_key_patch)
         PatchFeslCAKey();
     else
-        m2_logf("[*] CA-key patch disabled (set ca_key_patch=1 for a self-signed server)");
+        m2_logf("[*] CA-key patch disabled by config (FESL handshake will fail unless your cert's CA is already trusted)");
 
     m2_logf("[*] multiplayer-restore: armed. Server target = %s", g_resolved_ip);
     return 0;
