@@ -20,6 +20,15 @@
       "description": "Mutes or throttles the idle \"nag\" and proximity/POI voice-over; leaves mission dialog alone. Configurable via quiet_freeplay_vo.ini.",
       "version": "0.1.0",
       "assets": ["quiet_freeplay_vo.asi", "quiet_freeplay_vo.ini"]
+    },
+    {
+      "slug": "multiplayer-restore",
+      "name": "Multiplayer Restore",
+      "type": "asi",
+      "description": "Restores online multiplayer by routing EA matchmaking traffic to a private FESL server (DNS redirect + cert blindfold + clock spoof; optional pinned-CA patch). Configurable via multiplayer_restore.ini.",
+      "version": "0.1.0",
+      "assets": ["multiplayer_restore.asi", "multiplayer_restore.ini"],
+      "credits": "Ported from loganw234's Merc2Reborn (https://github.com/loganw234/Mercenaries2); original multiplayer RE and CA-key patch by loganw234."
     }
   ]
 }

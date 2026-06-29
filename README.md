@@ -20,6 +20,7 @@ and builds independently against a shared mod stdlib.
 | --- | --- |
 | [windowed-mode](mods/windowed-mode/) | Forces D3D9 windowed mode (min 1280×720) by hooking `IDirect3D9::CreateDevice`. |
 | [quiet-freeplay-vo](mods/quiet-freeplay-vo/) | Mutes or throttles the idle "nag" and proximity/POI voice-over (configurable via `.ini`); leaves mission dialog alone. |
+| [multiplayer-restore](mods/multiplayer-restore/) | Restores online multiplayer by routing EA matchmaking traffic to a private FESL server (configurable via `.ini`). Ported from [loganw234's Merc2Reborn](https://github.com/loganw234/Mercenaries2). |
 
 ## Installation
 
@@ -69,6 +70,10 @@ make -C mods/windowed-mode
 ```
 
 Built `.asi` files are written into each mod's directory and are git-ignored.
+
+Every push to `main` and every pull request is built by CI
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), which runs `make`
+across all mods and fails if any mod doesn't produce an `.asi`.
 
 ### Updating the world-load ladder
 
