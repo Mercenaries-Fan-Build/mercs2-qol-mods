@@ -29,6 +29,14 @@
       "version": "0.1.0",
       "assets": ["multiplayer_restore.asi", "multiplayer_restore.ini"],
       "credits": "Ported from loganw234's Merc2Reborn (https://github.com/loganw234/Mercenaries2); original multiplayer RE and CA-key patch by loganw234."
+    },
+    {
+      "slug": "loadmarkers",
+      "name": "Load Markers",
+      "type": "asi",
+      "description": "Example mod: surfaces world-load progress to loadmarkers.log and fires when the player is actually in-game, without enabling PMC_VERBOSE_LOG.",
+      "version": "0.1.0",
+      "assets": ["loadmarkers.asi"]
     }
   ]
 }

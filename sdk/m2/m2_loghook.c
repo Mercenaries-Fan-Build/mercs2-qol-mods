@@ -130,16 +130,53 @@ static int __cdecl Hook_LogStub(void* L) {
     return 0;
 }
 
+/* --- Best path (pmc_bb >= 3.1.0): subscribe to its live in-process log stream ---
+ *
+ * pmc_bb exports pmc_log_subscribe(cb, ud): cb fires for every log line as it's
+ * written — no file tail, and it works in pmc_bb's default markers-only mode, so
+ * PMC_VERBOSE_LOG is NOT required for load-progress visibility. The sink shape
+ * matches m2_log_listener. pmc_bb hands us the fully-formatted line WITH a
+ * trailing newline; strip it so listeners see the same shape as the tail path.
+ * The callback runs under pmc_bb's log lock — stays cheap, never calls pmc_log. */
+typedef int (*pmc_log_subscribe_fn)(m2_log_listener cb, void* ud);
+
+static void OnPmcLine(const char* line, void* ud) {
+    char buf[2048];
+    int n;
+    (void)ud;
+    if (!line) return;
+    n = (int)strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
+    if (n <= 0) return;
+    if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    memcpy(buf, line, (size_t)n);
+    buf[n] = '\0';
+    DispatchLine(buf);
+}
+
 int m2_loghook_install(void) {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 1;
 
-    /* Prefer consuming pmc_bb's canonical log (it owns the stub hook). Only when
-     * pmc_bb isn't present do we hook the shared stub ourselves (chained). */
+    /* Best: subscribe to pmc_bb's live log stream (pmc_bb >= 3.1.0). In-process,
+     * no file, works in pmc_bb's default markers-only mode (no PMC_VERBOSE_LOG). */
+    {
+        HMODULE bb = GetModuleHandleA("pmc_bb.dll");
+        if (bb) {
+            pmc_log_subscribe_fn sub =
+                (pmc_log_subscribe_fn)GetProcAddress(bb, "pmc_log_subscribe");
+            if (sub && sub(OnPmcLine, NULL)) return 1;
+            /* older pmc_bb without the export — fall through to the file tail */
+        }
+    }
+
+    /* Fallback (older pmc_bb): tail the log it already writes — pure consumer,
+     * we never touch the stub, so we can't shadow pmc_bb's logger. */
     if (GetModuleHandleA("pmc_bb.dll")) {
         if (CreateThread(NULL, 0, TailThread, NULL, 0, NULL)) return 1;
         /* thread spawn failed — fall through to self-hook */
     }
 
+    /* No pmc_bb at all: hook the shared stub ourselves (chained). */
     if (!m2_hook_attach((void*)M2_LOG_STUB_VA, (void*)Hook_LogStub, &g_origStub)) {
         InterlockedExchange(&g_installed, 0);
         return 0;

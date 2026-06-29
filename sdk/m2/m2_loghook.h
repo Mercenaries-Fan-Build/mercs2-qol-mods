@@ -3,11 +3,14 @@
  * The SDK's single event source for "what did the game just say"; m2_loadtrigger
  * is built on it and mods can listen directly.
  *
- * Source selection (see m2_loghook_install):
- *   - If pmc_bb.dll is loaded, it already owns the log-stub hook and writes every
- *     line to pmc_blackbox.log — we TAIL that file (pure consumer; we never touch
- *     the stub, so we can't shadow pmc_bb's logger).
- *   - Otherwise we MinHook the shared no-op log stub (M2_LOG_STUB_VA) ourselves,
+ * Source selection (see m2_loghook_install), best first:
+ *   - pmc_bb >= 3.1.0 exports pmc_log_subscribe — we subscribe to its live
+ *     in-process log stream. No file, and it works in pmc_bb's default
+ *     markers-only mode, so PMC_VERBOSE_LOG is not required.
+ *   - Older pmc_bb: it owns the log-stub hook and writes every line to
+ *     pmc_blackbox.log — we TAIL that file (pure consumer; we never touch the
+ *     stub, so we can't shadow pmc_bb's logger).
+ *   - No pmc_bb: we MinHook the shared no-op log stub (M2_LOG_STUB_VA) ourselves,
  *     chaining the trampoline. Every Lua print / Debug.Printf / stripped subsystem
  *     log line funnels through it; string args are joined into a message.
  */
