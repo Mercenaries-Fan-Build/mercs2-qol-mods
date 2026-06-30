@@ -53,9 +53,13 @@
 #include <time.h>
 #include <stdint.h>
 
-#include "m2.h"
+#include "m2_log.h"
+#include "m2_hook.h"
+#include "m2_ini.h"
 
-/* ws2_32 / wintrust linked via the Makefile, not #pragma comment(lib). */
+/* Link with -lws2_32 -lwintrust (see Makefile). On MSVC builds, the
+ * old `#pragma comment(lib, ...)` would do this automatically; we
+ * pass them on the link command line instead so MinGW agrees. */
 
 /* ======================================================================== *
  * Status: PROOF-OF-CONCEPT — this port has NOT been built or test-run
@@ -131,31 +135,39 @@ static const BYTE kFeslCAKeyPayload[128] = {
 
 static char g_server_ip[64]  = "refesl.live";  /* overridden by INI */
 static int  g_spoof_clock    = 1;              /* overridden by INI */
-static int  g_ca_key_patch   = 1;              /* overridden by INI; required: game's FESL OpenSSL validates against a baked-in CA key */
+static int  g_hook_dns       = 1;              /* overridden by INI */
+static int  g_hook_cert      = 1;              /* overridden by INI */
+static int  g_patch_ca       = 1;              /* overridden by INI */
 static HMODULE g_hModule     = NULL;
 
 /* ------------------------------------------------------------------------ *
- * INI config — minimal: server IP + clock spoof on/off.
+ * INI config — server IP + clock spoof + hook toggles.
  * ------------------------------------------------------------------------ */
 
-/* m2_ini_kv signature: (ud, key, value), no section arg. Keys are unique. */
+/* m2_ini_parse's callback signature is (ud, key, value) — the parser
+ * strips section headers internally and never surfaces them, so we
+ * dispatch on the key name alone. */
 static void OnIniKV(void* ud, const char* key, const char* value) {
     (void)ud;
     if (!key || !value) return;
-    if (lstrcmpiA(key, "ip") == 0) {
-        lstrcpynA(g_server_ip, value, (int)sizeof(g_server_ip));
-    } else if (lstrcmpiA(key, "spoof_clock") == 0) {
+    if (_stricmp(key, "ip") == 0) {
+        strncpy(g_server_ip, value, sizeof(g_server_ip) - 1);
+        g_server_ip[sizeof(g_server_ip) - 1] = 0;
+    } else if (_stricmp(key, "spoof_clock") == 0 || _stricmp(key, "hook_time") == 0) {
         g_spoof_clock = m2_ini_bool(value);
-    } else if (lstrcmpiA(key, "ca_key_patch") == 0) {
-        g_ca_key_patch = m2_ini_bool(value);
+    } else if (_stricmp(key, "hook_dns") == 0) {
+        g_hook_dns = m2_ini_bool(value);
+    } else if (_stricmp(key, "hook_cert") == 0) {
+        g_hook_cert = m2_ini_bool(value);
+    } else if (_stricmp(key, "patch_ca") == 0) {
+        g_patch_ca = m2_ini_bool(value);
     }
 }
 
 static void LoadConfig(void) {
     char ini_path[MAX_PATH];
-    m2_module_path(g_hModule, "multiplayer_restore.ini", ini_path, (int)sizeof(ini_path));
-    if (!m2_ini_parse(ini_path, OnIniKV, NULL))
-        m2_logf("[*] no multiplayer_restore.ini (%s); using defaults", ini_path);
+    m2_module_path(g_hModule, "multiplayer_restore.ini", ini_path, sizeof(ini_path));
+    m2_ini_parse(ini_path, OnIniKV, NULL);
 }
 
 /* ------------------------------------------------------------------------ *
@@ -174,7 +186,7 @@ static void ResolveServer(void) {
     /* If the INI value already looks like a dotted-quad, skip DNS. */
     struct in_addr probe;
     if (inet_pton(AF_INET, g_server_ip, &probe) == 1) {
-        lstrcpynA(g_resolved_ip, g_server_ip, (int)sizeof(g_resolved_ip));
+        strncpy(g_resolved_ip, g_server_ip, sizeof(g_resolved_ip) - 1); g_resolved_ip[sizeof(g_resolved_ip) - 1] = 0;
         m2_logf("[*] Using server IP from config: %s", g_resolved_ip);
         WSACleanup();
         return;
@@ -185,7 +197,7 @@ static void ResolveServer(void) {
     if (getaddrinfo(g_server_ip, NULL, &hints, &res) == 0 && res) {
         struct sockaddr_in* a = (struct sockaddr_in*)res->ai_addr;
         const char* dotted = inet_ntoa(a->sin_addr);
-        if (dotted) lstrcpynA(g_resolved_ip, dotted, (int)sizeof(g_resolved_ip));
+        if (dotted) { strncpy(g_resolved_ip, dotted, sizeof(g_resolved_ip) - 1); g_resolved_ip[sizeof(g_resolved_ip) - 1] = 0; }
         freeaddrinfo(res);
         m2_logf("[+] Resolved %s -> %s", g_server_ip, g_resolved_ip);
     } else {
@@ -255,10 +267,10 @@ static int WSAAPI d_getaddrinfow(PCWSTR node, PCWSTR svc,
         char nn[256]; NarrowFromWide(node, nn, sizeof(nn));
         if (IsTargetHost(nn)) {
             wchar_t wip[64];
-            size_t i = 0;
-            for (; g_resolved_ip[i] && i + 1 < sizeof(wip) / sizeof(wip[0]); ++i)
+            for (size_t i = 0; i < sizeof(g_resolved_ip) && g_resolved_ip[i]; ++i) {
                 wip[i] = (wchar_t)g_resolved_ip[i];
-            wip[i] = 0;
+                wip[i+1] = 0;
+            }
             m2_logf("[+] (GetAddrInfoW) %s -> %s", nn, g_resolved_ip);
             return o_getaddrinfow(wip, svc, hints, res);
         }
@@ -323,9 +335,9 @@ static __time64_t __cdecl d_time64(__time64_t* t) {
  * ------------------------------------------------------------------------ */
 
 static int PatchFeslCAKey(void) {
-    HMODULE mod = GetModuleHandleA("Mercenaries2.exe");
+    HMODULE mod = GetModuleHandleA(NULL);
     if (!mod) {
-        m2_logf("[!] PatchFeslCAKey: Mercenaries2.exe not loaded");
+        m2_logf("[!] PatchFeslCAKey: Host module not loaded");
         return 0;
     }
     BYTE* target = (BYTE*)mod + FESL_CA_KEY_RVA;
@@ -390,22 +402,34 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
     (void)arg;
 
     LoadConfig();
-    ResolveServer();
+    if (g_hook_dns) {
+        ResolveServer();
+    } else {
+        m2_logf("[*] DNS resolution skipped (DNS redirect disabled)");
+    }
 
     if (!m2_hook_init()) {
         m2_logf("[!] m2_hook_init failed; aborting");
         return 1;
     }
 
-    /* 1. DNS redirect (required). */
-    HookApi("ws2_32.dll", "gethostbyname",   (void*)d_gethostbyname,   (void**)&o_gethostbyname,   1);
-    HookApi("ws2_32.dll", "getaddrinfo",     (void*)d_getaddrinfo,     (void**)&o_getaddrinfo,     1);
-    HookApi("ws2_32.dll", "GetAddrInfoW",    (void*)d_getaddrinfow,    (void**)&o_getaddrinfow,    1);
+    /* 1. DNS redirect. */
+    if (g_hook_dns) {
+        HookApi("ws2_32.dll", "gethostbyname",   (void*)d_gethostbyname,   (void**)&o_gethostbyname,   1);
+        HookApi("ws2_32.dll", "getaddrinfo",     (void*)d_getaddrinfo,     (void**)&o_getaddrinfo,     1);
+        HookApi("ws2_32.dll", "GetAddrInfoW",    (void*)d_getaddrinfow,    (void**)&o_getaddrinfow,    1);
+    } else {
+        m2_logf("[*] DNS redirect hook disabled by config");
+    }
 
-    /* 2. Cert blob blindfold (required). */
-    HookApi("wintrust.dll", "WinVerifyTrust", (void*)d_winverifytrust, (void**)&o_winverifytrust, 1);
+    /* 2. Cert blob blindfold. */
+    if (g_hook_cert) {
+        HookApi("wintrust.dll", "WinVerifyTrust", (void*)d_winverifytrust, (void**)&o_winverifytrust, 1);
+    } else {
+        m2_logf("[*] WinVerifyTrust hook disabled by config");
+    }
 
-    /* 3. Time spoof (optional). */
+    /* 3. Time spoof. */
     if (g_spoof_clock) {
         HookApi("kernel32.dll", "GetSystemTime",            (void*)d_GetSystemTime,            (void**)&o_GetSystemTime,            1);
         HookApi("kernel32.dll", "GetLocalTime",             (void*)d_GetLocalTime,             (void**)&o_GetLocalTime,             1);
@@ -421,16 +445,13 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         m2_logf("[*] clock spoof disabled by config");
     }
 
-    /* 4. FESL CA pubkey patch. Required for the FESL TLS handshake: the
-     *    game's statically-linked OpenSSL validates the server cert against
-     *    a CA key baked into .rdata (not WinVerifyTrust), and on the cracked
-     *    EXE that key isn't EA's — so even the genuine cert fails without
-     *    this. Verified live: handshake resets with it off, completes with
-     *    it on. On by default; disable only for a custom CA + key payload. */
-    if (g_ca_key_patch)
+    /* 4. FESL CA pubkey patch — runs after hooks so any logging from
+     *    the wait loop goes through the live logger. */
+    if (g_patch_ca) {
         PatchFeslCAKey();
-    else
-        m2_logf("[*] CA-key patch disabled by config (FESL handshake will fail unless your cert's CA is already trusted)");
+    } else {
+        m2_logf("[*] FESL CA key patch disabled by config");
+    }
 
     m2_logf("[*] multiplayer-restore: armed. Server target = %s", g_resolved_ip);
     return 0;
