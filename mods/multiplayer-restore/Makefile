@@ -1,46 +1,36 @@
-# Makefile for multiplayer_restore.asi — built against the Mercs2 mod stdlib (sdk/).
+# Makefile for multiplayer_restore.asi — built against the Mercs2 mod stdlib.
 #
-# Drop this directory under mercs2-qol-mods/mods/multiplayer-restore/ and run
-# `make`. For an out-of-tree checkout, point SDK_DIR at the SDK folder:
-#   make SDK_DIR=/path/to/mercs2-qol-mods/sdk
+# Pattern intentionally mirrors mods/quiet-freeplay-vo so any user familiar
+# with one mod can build the other.
 #
 # Prerequisites:
+#   Windows: MSYS2 + mingw-w64-i686-gcc (`pacman -S mingw-w64-i686-gcc mingw-w64-i686-make`)
+#   Linux:   apt install gcc-mingw-w64-i686
 #   macOS:   brew install mingw-w64
-#   Ubuntu:  apt install gcc-mingw-w64-i686
-#   Windows: MinGW (i686) on PATH, or MSVC via `make msvc`
 
-SDK_DIR ?= ../../sdk
-include $(SDK_DIR)/sdk.mk
+include ../../sdk/sdk.mk
 
 CC_MINGW    = i686-w64-mingw32-gcc
 STRIP_MINGW = i686-w64-mingw32-strip
-CC_MSVC     = cl
 
 TARGET      = multiplayer_restore.asi
 SRC         = multiplayer_restore.c
-# -static-libgcc: the time-spoof's 64-bit division pulls in libgcc's
-# __udivdi3; static-link it so the .asi has no libgcc_s_dw2-1.dll runtime dep.
-CFLAGS      = -O2 -Wall -Wno-unused-function -shared -static-libgcc \
-              -Wl,--enable-stdcall-fixup $(M2_CFLAGS) $(EXTRA_CFLAGS)
-LDFLAGS     = -lkernel32 -luser32 -lws2_32 -lwintrust
+CFLAGS      = -O2 -Wall -Wno-unused-function -static-libgcc -shared -Wl,--enable-stdcall-fixup $(M2_CFLAGS) $(EXTRA_CFLAGS)
+LDFLAGS     = -lws2_32 -lwintrust -lkernel32 -luser32
 
-.PHONY: all clean mingw msvc help
+.PHONY: all clean mingw help
 
 all: mingw
 
 mingw: $(SRC)
 	$(CC_MINGW) $(CFLAGS) -o $(TARGET) $(SRC) $(M2_SRCS) $(LDFLAGS)
-	-$(STRIP_MINGW) $(TARGET)
+	$(STRIP_MINGW) $(TARGET)
 	@echo "Built: $(TARGET) ($$(wc -c < $(TARGET)) bytes)"
 	@echo "Copy to: <game>/scripts/  (along with multiplayer_restore.ini)"
-
-msvc: $(SRC)
-	$(CC_MSVC) /LD /O2 /GS- $(M2_CFLAGS) $(SRC) $(M2_SRCS) \
-		/link /OUT:$(TARGET) kernel32.lib user32.lib ws2_32.lib wintrust.lib
-	@echo "Built: $(TARGET)"
 
 clean:
 	rm -f $(TARGET) *.obj *.exp *.lib multiplayer_restore.log
 
 help:
-	@echo "make mingw | msvc | clean"
+	@echo "make mingw   — Cross-compile with MinGW (default)"
+	@echo "make clean   — Remove build artifacts"
