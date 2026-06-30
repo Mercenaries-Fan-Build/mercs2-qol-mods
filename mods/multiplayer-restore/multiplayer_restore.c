@@ -138,6 +138,8 @@ static int  g_spoof_clock    = 1;              /* overridden by INI */
 static int  g_hook_dns       = 1;              /* overridden by INI */
 static int  g_hook_cert      = 1;              /* overridden by INI */
 static int  g_patch_ca       = 1;              /* overridden by INI */
+static int  g_patch_bversion = 1;              /* overridden by INI */
+static int  g_target_bversion = 1555000000;    /* overridden by INI */
 static HMODULE g_hModule     = NULL;
 
 /* ------------------------------------------------------------------------ *
@@ -161,6 +163,10 @@ static void OnIniKV(void* ud, const char* key, const char* value) {
         g_hook_cert = m2_ini_bool(value);
     } else if (_stricmp(key, "patch_ca") == 0) {
         g_patch_ca = m2_ini_bool(value);
+    } else if (_stricmp(key, "patch_bversion") == 0) {
+        g_patch_bversion = m2_ini_bool(value);
+    } else if (_stricmp(key, "bversion") == 0) {
+        g_target_bversion = atoi(value);
     }
 }
 
@@ -373,6 +379,114 @@ static int PatchFeslCAKey(void) {
     return 1;
 }
 
+/* FNV-1a 64-bit hashing helper. */
+static uint64_t Fnv1a64(const void* data, size_t len) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    const uint8_t* b = (const uint8_t*)data;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= b[i];
+        h *= 0x100000001B3ULL;
+    }
+    return h;
+}
+
+/* Memory safety prober. */
+static BOOL SafeProbe(const void* p, size_t bytes) {
+    const char* addr;
+    const char* end;
+    const DWORD readable =
+        PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const DWORD unreadable = PAGE_NOACCESS | PAGE_GUARD;
+    MEMORY_BASIC_INFORMATION mbi;
+
+    if (!p || (uintptr_t)p < 0x10000) return FALSE;
+    addr = (const char*)p;
+    end  = addr + bytes;
+    while (addr < end) {
+        if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0) return FALSE;
+        if (mbi.State != MEM_COMMIT) return FALSE;
+        if (mbi.Protect & unreadable) return FALSE;
+        if (!(mbi.Protect & readable)) return FALSE;
+        addr = (const char*)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return TRUE;
+}
+
+/* Dynamically determines the correct B-version check instruction RVA in the binary. */
+static DWORD GetBVersionRva(HMODULE mod) {
+    BYTE* base = (BYTE*)mod;
+
+    // 1. Try dynamic fingerprint matching first (from RVA 0x11000 FNV-1a hash)
+    if (SafeProbe(base + 0x11000, 0x1000)) {
+        uint64_t fp = Fnv1a64(base + 0x11000, 0x1000);
+        m2_logf("[*] GetBVersionRva: binary fingerprint = 0x%016llX", fp);
+        if (fp == 0xB79E4DD22A4BFCB3ULL) {
+            m2_logf("[*] GetBVersionRva: matched Retail (v1.1)");
+            return 0x4448E8;
+        } else if (fp == 0x1942B494FF9F4DB3ULL) {
+            m2_logf("[*] GetBVersionRva: matched Bypass (v1.1_bypass)");
+            return 0x444688;
+        }
+    }
+
+    // 2. Fallback heuristic: Probe both known target code offsets for the signature bytes
+    // Pattern: 8B 54 24 18 52 (mov edx, [esp+18h]; push edx)
+    const BYTE kPattern[5] = {0x8B, 0x54, 0x24, 0x18, 0x52};
+
+    if (SafeProbe(base + 0x444688, 5) && memcmp(base + 0x444688, kPattern, 5) == 0) {
+        m2_logf("[*] GetBVersionRva: matched Bypass signature at RVA 0x444688");
+        return 0x444688;
+    }
+    if (SafeProbe(base + 0x4448E8, 5) && memcmp(base + 0x4448E8, kPattern, 5) == 0) {
+        m2_logf("[*] GetBVersionRva: matched Retail signature at RVA 0x4448E8");
+        return 0x4448E8;
+    }
+
+    m2_logf("[!] GetBVersionRva: could not find valid B-version check signature");
+    return 0;
+}
+
+static int PatchBVersion(void) {
+    HMODULE mod = GetModuleHandleA(NULL);
+    if (!mod) {
+        m2_logf("[!] PatchBVersion: Host module not loaded");
+        return 0;
+    }
+    
+    DWORD rva = GetBVersionRva(mod);
+    if (rva == 0) {
+        m2_logf("[!] PatchBVersion: Aborting patch due to unknown binary signature");
+        return 0;
+    }
+    
+    BYTE* target = (BYTE*)mod + rva;
+
+    /* Original instruction bytes: 
+     * 8B 54 24 18     mov edx, [esp+18h]
+     * 52              push edx
+     * 
+     * Target replacement bytes (Push g_target_bversion):
+     * 68 [4 bytes of value]  push imm32
+     */
+    BYTE kPatchPayload[5];
+    kPatchPayload[0] = 0x68; // push imm32
+    memcpy(&kPatchPayload[1], &g_target_bversion, sizeof(g_target_bversion));
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, sizeof(kPatchPayload), PAGE_READWRITE, &oldProtect)) {
+        m2_logf("[!] PatchBVersion: VirtualProtect failed, GLE=%lu", GetLastError());
+        return 0;
+    }
+    
+    memcpy(target, kPatchPayload, sizeof(kPatchPayload));
+    DWORD tmp = 0;
+    VirtualProtect(target, sizeof(kPatchPayload), oldProtect, &tmp);
+
+    m2_logf("[+] B-version check patched to always return %d (VA 0x%p)", g_target_bversion, target);
+    return 1;
+}
+
 /* ------------------------------------------------------------------------ *
  * Hook arming
  * ------------------------------------------------------------------------ */
@@ -382,19 +496,23 @@ static int HookApi(const char* module, const char* fn,
     HMODULE m = GetModuleHandleA(module);
     if (!m) m = LoadLibraryA(module);
     if (!m) {
-        if (required) m2_logf("[!] HookApi: module %s not loadable", module);
+        if (required) {
+            m2_logf("[!] HookApi: failed to load module %s", module);
+        }
         return 0;
     }
-    void* target = (void*)GetProcAddress(m, fn);
-    if (!target) {
-        if (required) m2_logf("[!] HookApi: %s!%s not found", module, fn);
+    void* p = (void*)GetProcAddress(m, fn);
+    if (!p) {
+        if (required) {
+            m2_logf("[!] HookApi: export %s not found in %s", fn, module);
+        }
         return 0;
     }
-    if (!m2_hook_attach(target, detour, orig)) {
-        m2_logf("[!] m2_hook_attach failed for %s!%s", module, fn);
+    if (m2_hook_attach(p, detour, orig) == 0) {
+        m2_logf("[!] HookApi: failed to attach hook for %s!%s", module, fn);
         return 0;
     }
-    m2_logf("[*] hooked %s!%s -> %p", module, fn, detour);
+    m2_logf("[*] hooked %s!%s -> %p", module, fn, p);
     return 1;
 }
 
@@ -402,6 +520,14 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
     (void)arg;
 
     LoadConfig();
+
+    /* 1. Apply B-version patch immediately to beat the connection initialization race condition */
+    if (g_patch_bversion) {
+        PatchBVersion();
+    } else {
+        m2_logf("[*] B-version patch disabled by config");
+    }
+
     if (g_hook_dns) {
         ResolveServer();
     } else {
@@ -413,7 +539,7 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         return 1;
     }
 
-    /* 1. DNS redirect. */
+    /* 2. DNS redirect. */
     if (g_hook_dns) {
         HookApi("ws2_32.dll", "gethostbyname",   (void*)d_gethostbyname,   (void**)&o_gethostbyname,   1);
         HookApi("ws2_32.dll", "getaddrinfo",     (void*)d_getaddrinfo,     (void**)&o_getaddrinfo,     1);
@@ -422,14 +548,14 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         m2_logf("[*] DNS redirect hook disabled by config");
     }
 
-    /* 2. Cert blob blindfold. */
+    /* 3. Cert blob blindfold. */
     if (g_hook_cert) {
         HookApi("wintrust.dll", "WinVerifyTrust", (void*)d_winverifytrust, (void**)&o_winverifytrust, 1);
     } else {
         m2_logf("[*] WinVerifyTrust hook disabled by config");
     }
 
-    /* 3. Time spoof. */
+    /* 4. Time spoof. */
     if (g_spoof_clock) {
         HookApi("kernel32.dll", "GetSystemTime",            (void*)d_GetSystemTime,            (void**)&o_GetSystemTime,            1);
         HookApi("kernel32.dll", "GetLocalTime",             (void*)d_GetLocalTime,             (void**)&o_GetLocalTime,             1);
@@ -445,7 +571,7 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         m2_logf("[*] clock spoof disabled by config");
     }
 
-    /* 4. FESL CA pubkey patch — runs after hooks so any logging from
+    /* 5. FESL CA pubkey patch — runs after hooks so any logging from
      *    the wait loop goes through the live logger. */
     if (g_patch_ca) {
         PatchFeslCAKey();
