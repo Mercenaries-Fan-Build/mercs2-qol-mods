@@ -10,27 +10,18 @@
  *      the configured private server (default refesl.live, resolved
  *      at startup).
  *
- *   2. Cert blob blindfold — intercepts wintrust WinVerifyTrust and
- *      returns ERROR_SUCCESS for WTD_CHOICE_BLOB so the private
- *      server's self-signed cert is accepted. Local file/catalog
- *      cert validation (the SecuROM boot path) is left untouched.
- *
- *   3. Time spoof — pins the system clock returned by both Win32
- *      (kernel32 GetSystemTime/GetLocalTime/GetSystemTimeAsFileTime)
- *      and the C runtime (msvcrt time/_time32/_time64) to a date
- *      inside the served cert's validity window (default 2012-06-15).
- *      This is belt-and-braces with the WinVerifyTrust blindfold; in
- *      principle redundant after the cert is accepted, but cheap and
- *      keeps OpenSSL's CRT-side expiry check happy. Toggle off via
- *      INI if you want to test without it.
- *
- *   4. FESL CA pubkey patch — single 128-byte write into the game's
+ *   2. FESL CA pubkey patch — single 128-byte write into the game's
  *      .rdata at FESL_CA_KEY_RVA, replaying the MLoader patch so the
  *      game's SSL stack accepts the private server's cert chain. The
  *      write is gated on a poll loop that waits for SecuROM to
  *      finish unpacking that section, mirroring what MLoader does.
- *      THIS IS THE ONE LIKELY-FRAGILE STEP on the cracked binary —
- *      see the status block immediately below.
+ *
+ * Historical note: earlier revisions of this port also included a
+ * WinVerifyTrust cert-blob blindfold and a Win32/CRT clock spoof
+ * (pinning time to 2012-06-15 to keep OpenSSL's expiry check happy).
+ * Both were removed after live testing showed the CA key patch alone
+ * is sufficient to let the private server's cert chain validate — the
+ * belt-and-braces layers were experimentation-era scaffolding.
  *
  * What it does NOT do:
  *
@@ -47,66 +38,37 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <wintrust.h>
 #include <string.h>
 #include <stdio.h>
-#include <time.h>
 #include <stdint.h>
 
 #include "m2_log.h"
 #include "m2_hook.h"
 #include "m2_ini.h"
 
-/* Link with -lws2_32 -lwintrust (see Makefile). On MSVC builds, the
- * old `#pragma comment(lib, ...)` would do this automatically; we
- * pass them on the link command line instead so MinGW agrees. */
+/* Link with -lws2_32 (see Makefile). On MSVC builds, the old
+ * `#pragma comment(lib, ...)` would do this automatically; we pass
+ * it on the link command line instead so MinGW agrees. */
 
 /* ======================================================================== *
- * Status: PROOF-OF-CONCEPT — this port has NOT been built or test-run
- * against the mercs2-qol-mods framework. The author drafted it without
- * the SDK build environment (MinGW, pmc_bb.dll runtime, etc.) set up
- * locally. The underlying *approach* is validated:
+ * Notes:
  *
- *   * The standalone Merc2Fix.asi (which this is ported from) was run
- *     against a mercs2-securom-bypass-patched Mercenaries2.exe. All
- *     five hooks armed, multiplayer worked end-to-end, no anti-tamper
- *     trips. (The companion Lua bridge correctly aborted itself via
- *     its RVA prologue check, as expected — that side is out of scope
- *     for this multiplayer-only port.)
+ *   * FESL_CA_KEY_RVA (0x768378) was extracted from MLoader's dump against
+ *     the archive.org English retail build. The bypass tool swaps the
+ *     import table cruise.dll -> pmc_bb.dll (same name length, no shift)
+ *     and edits .text to strip the DRM validation; it does not resize
+ *     .rdata, so the offset is stable on the bypass target as well.
+ *     Verify before shipping against a new binary: dump the first 16
+ *     bytes at this RVA and confirm they look like a placeholder (mostly
+ *     zeros or a single repeated pattern), not real engine data.
  *
- * What that means: the hooking model, time-spoof strategy, and CA
- * key patch all behave on the bypass target. The architecture is
- * sound. Bugs from here are most likely going to be SDK-integration
- * mistakes (wrong helper signature assumed, missing init step,
- * style mismatches) rather than fundamental design issues.
- *
- * Remaining open question:
- *
- *   FESL_CA_KEY_RVA below (0x768378) was extracted from MLoader's
- *   dump against the archive.org English retail build. The bypass
- *   tool swaps the import table cruise.dll -> pmc_bb.dll (same name
- *   length, no shift) and edits .text to strip the DRM validation;
- *   it most likely does not resize .rdata, so the offset should be
- *   stable on the bypass target — but please verify before shipping.
- *   30-second check: dump the first 16 bytes at this RVA in your
- *   live process and confirm they look like a 128-byte placeholder
- *   (mostly zeros or a single repeated pattern), not real engine
- *   data. If real data is there, the offset moved.
- *
- * Notes that aren't blockers:
- *
- *   * The SDK's m2_hook.h warning about .rdata anti-tamper writes
- *     does not appear to apply to the bypass target (SecuROM is
- *     stripped, pmc_bb.dll explicitly doesn't do integrity checks).
- *     Our PatchFeslCAKey still keeps a short unpack-wait poll as a
- *     no-op safety net for users running this on a different (e.g.
- *     archive.org or MLoader-cracked) binary — exits on the first
- *     iteration when bytes are already in plaintext.
- *
- *   * msvcr80.dll / msvcr90.dll may or may not be loaded depending
- *     on the toolset; GetProcAddress returns NULL on the missing
- *     ones and we skip those CRT time hooks quietly (passed
- *     required=0 in HookApi).
+ *   * The SDK's m2_hook.h warning about .rdata anti-tamper writes does
+ *     not apply to the bypass target (SecuROM is stripped, pmc_bb.dll
+ *     explicitly does not perform integrity checks). PatchFeslCAKey
+ *     still keeps a short unpack-wait poll as a no-op safety net for
+ *     users running this on a different (archive.org or MLoader-cracked)
+ *     binary — it exits on the first iteration when bytes are already
+ *     in plaintext.
  * ======================================================================== */
 
 #define FESL_CA_KEY_RVA  0x768378u
@@ -129,19 +91,15 @@ static const BYTE kFeslCAKeyPayload[128] = {
     0x3E, 0x71, 0x08, 0x9F, 0x20, 0xD4, 0x3D, 0x6D,
 };
 
-#define SPOOF_YEAR   2012
-#define SPOOF_MONTH  6
-#define SPOOF_DAY    15
-
-static char g_server_ip[64]  = "refesl.live";  /* overridden by INI */
-static int  g_spoof_clock    = 1;              /* overridden by INI */
-static int  g_hook_dns       = 1;              /* overridden by INI */
-static int  g_hook_cert      = 1;              /* overridden by INI */
-static int  g_patch_ca       = 1;              /* overridden by INI */
-static HMODULE g_hModule     = NULL;
+static char g_server_ip[64]   = "refesl.live";   /* overridden by INI */
+static int  g_hook_dns        = 1;               /* overridden by INI */
+static int  g_patch_ca        = 1;               /* overridden by INI */
+static int  g_patch_bversion  = 1;               /* overridden by INI */
+static int  g_target_bversion = 1555000000;      /* overridden by INI */
+static HMODULE g_hModule      = NULL;
 
 /* ------------------------------------------------------------------------ *
- * INI config — server IP + clock spoof + hook toggles.
+ * INI config — server IP + hook toggles.
  * ------------------------------------------------------------------------ */
 
 /* m2_ini_parse's callback signature is (ud, key, value) — the parser
@@ -153,20 +111,60 @@ static void OnIniKV(void* ud, const char* key, const char* value) {
     if (_stricmp(key, "ip") == 0) {
         strncpy(g_server_ip, value, sizeof(g_server_ip) - 1);
         g_server_ip[sizeof(g_server_ip) - 1] = 0;
-    } else if (_stricmp(key, "spoof_clock") == 0 || _stricmp(key, "hook_time") == 0) {
-        g_spoof_clock = m2_ini_bool(value);
     } else if (_stricmp(key, "hook_dns") == 0) {
         g_hook_dns = m2_ini_bool(value);
-    } else if (_stricmp(key, "hook_cert") == 0) {
-        g_hook_cert = m2_ini_bool(value);
     } else if (_stricmp(key, "patch_ca") == 0) {
         g_patch_ca = m2_ini_bool(value);
+    } else if (_stricmp(key, "patch_bversion") == 0) {
+        g_patch_bversion = m2_ini_bool(value);
+    } else if (_stricmp(key, "bversion") == 0) {
+        g_target_bversion = atoi(value);
     }
+}
+
+/* Baked-in defaults, written to disk if the .ini is missing. Keeps the
+ * .asi self-sufficient — users can drop the .asi alone and get a
+ * commented, editable config on first launch. */
+static const char kDefaultIni[] =
+    "; multiplayer-restore configuration.\n"
+    "; Drop this next to multiplayer_restore.asi in your game folder.\n"
+    "\n"
+    "[server]\n"
+    "; Hostname or dotted-quad of the FESL server to redirect EA traffic to.\n"
+    "; The default points at the public Merc2Reborn relay run by loganw.\n"
+    "; Override only if you're hosting your own server (see\n"
+    "; https://github.com/loganw234/Mercenaries2 for setup notes).\n"
+    "ip = refesl.live\n"
+    "\n"
+    "[compat]\n"
+    "; 1 = patch the b-version check to advertise a specific build version.\n"
+    "; 0 = leave the b-version check alone.\n"
+    "patch_bversion = 1\n"
+    "\n"
+    "; The specific build version integer to advertise to the FESL server.\n"
+    "; Default: 1555000000\n"
+    "bversion = 1555000000\n"
+    "\n"
+    "[debug]\n"
+    "; WARNING: Do not modify the settings below unless you are positive\n"
+    "; about what you are doing. These are toggles for individual hooks.\n"
+    "hook_dns = 1\n"
+    "patch_ca = 1\n";
+
+static void EnsureIniDefault(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "w");
+    if (!f) return;
+    fputs(kDefaultIni, f);
+    fclose(f);
+    m2_logf("[*] multiplayer_restore: wrote default %s", path);
 }
 
 static void LoadConfig(void) {
     char ini_path[MAX_PATH];
     m2_module_path(g_hModule, "multiplayer_restore.ini", ini_path, sizeof(ini_path));
+    EnsureIniDefault(ini_path);
     m2_ini_parse(ini_path, OnIniKV, NULL);
 }
 
@@ -228,21 +226,10 @@ static void NarrowFromWide(const wchar_t* w, char* out, size_t out_max) {
 typedef struct hostent* (WINAPI* GETHOSTBYNAME_FN)(const char*);
 typedef int (WSAAPI* GETADDRINFO_FN)(PCSTR, PCSTR, const ADDRINFOA*, PADDRINFOA*);
 typedef int (WSAAPI* GETADDRINFOW_FN)(PCWSTR, PCWSTR, const ADDRINFOW*, PADDRINFOW*);
-typedef LONG (WINAPI* WINVERIFYTRUST_FN)(HWND, GUID*, LPVOID);
-typedef VOID (WINAPI* GETSYSTEMTIME_FN)(LPSYSTEMTIME);
-typedef VOID (WINAPI* GETLOCALTIME_FN)(LPSYSTEMTIME);
-typedef VOID (WINAPI* GETSYSTEMTIMEASFILETIME_FN)(LPFILETIME);
-typedef time_t      (__cdecl* TIME_FN)(time_t*);
-typedef __time32_t  (__cdecl* TIME32_FN)(__time32_t*);
-typedef __time64_t  (__cdecl* TIME64_FN)(__time64_t*);
 
-static GETHOSTBYNAME_FN            o_gethostbyname        = NULL;
-static GETADDRINFO_FN              o_getaddrinfo          = NULL;
-static GETADDRINFOW_FN             o_getaddrinfow         = NULL;
-static WINVERIFYTRUST_FN           o_winverifytrust       = NULL;
-static GETSYSTEMTIME_FN            o_GetSystemTime        = NULL;
-static GETLOCALTIME_FN             o_GetLocalTime         = NULL;
-static GETSYSTEMTIMEASFILETIME_FN  o_GetSystemTimeAsFileTime = NULL;
+static GETHOSTBYNAME_FN  o_gethostbyname = NULL;
+static GETADDRINFO_FN    o_getaddrinfo   = NULL;
+static GETADDRINFOW_FN   o_getaddrinfow  = NULL;
 
 static struct hostent* WINAPI d_gethostbyname(const char* name) {
     if (name && IsTargetHost(name)) {
@@ -276,58 +263,6 @@ static int WSAAPI d_getaddrinfow(PCWSTR node, PCWSTR svc,
         }
     }
     return o_getaddrinfow(node, svc, hints, res);
-}
-
-static LONG WINAPI d_winverifytrust(HWND hwnd, GUID* action, LPVOID data) {
-    if (data) {
-        WINTRUST_DATA* d = (WINTRUST_DATA*)data;
-        if (d->dwUnionChoice == WTD_CHOICE_BLOB) {
-            m2_logf("[+] WinVerifyTrust(BLOB) -> ERROR_SUCCESS");
-            return ERROR_SUCCESS;
-        }
-    }
-    return o_winverifytrust(hwnd, action, data);
-}
-
-static void ApplySpoof(LPSYSTEMTIME st) {
-    if (!st) return;
-    st->wYear  = SPOOF_YEAR;
-    st->wMonth = SPOOF_MONTH;
-    st->wDay   = SPOOF_DAY;
-}
-
-static VOID WINAPI d_GetSystemTime(LPSYSTEMTIME st) {
-    o_GetSystemTime(st); ApplySpoof(st);
-}
-static VOID WINAPI d_GetLocalTime(LPSYSTEMTIME st) {
-    o_GetLocalTime(st); ApplySpoof(st);
-}
-static VOID WINAPI d_GetSystemTimeAsFileTime(LPFILETIME ft) {
-    SYSTEMTIME st;
-    o_GetSystemTime(&st);
-    ApplySpoof(&st);
-    SystemTimeToFileTime(&st, ft);
-}
-
-/* CRT time hooks — OpenSSL's cert-expiry check uses these, NOT the
- * kernel32 ones. msvcr80/msvcr90 may or may not be loaded; if not we
- * skip the hook in WorkerThread. */
-static time_t __cdecl d_time(time_t* t) {
-    FILETIME ft; d_GetSystemTimeAsFileTime(&ft);
-    ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
-    time_t sec = (time_t)((u.QuadPart - 116444736000000000ULL) / 10000000ULL);
-    if (t) *t = sec;
-    return sec;
-}
-static __time32_t __cdecl d_time32(__time32_t* t) {
-    __time32_t s = (__time32_t)d_time(NULL);
-    if (t) *t = s;
-    return s;
-}
-static __time64_t __cdecl d_time64(__time64_t* t) {
-    __time64_t s = (__time64_t)d_time(NULL);
-    if (t) *t = s;
-    return s;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -373,6 +308,114 @@ static int PatchFeslCAKey(void) {
     return 1;
 }
 
+/* FNV-1a 64-bit hashing helper. */
+static uint64_t Fnv1a64(const void* data, size_t len) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    const uint8_t* b = (const uint8_t*)data;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= b[i];
+        h *= 0x100000001B3ULL;
+    }
+    return h;
+}
+
+/* Memory safety prober. */
+static BOOL SafeProbe(const void* p, size_t bytes) {
+    const char* addr;
+    const char* end;
+    const DWORD readable =
+        PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    const DWORD unreadable = PAGE_NOACCESS | PAGE_GUARD;
+    MEMORY_BASIC_INFORMATION mbi;
+
+    if (!p || (uintptr_t)p < 0x10000) return FALSE;
+    addr = (const char*)p;
+    end  = addr + bytes;
+    while (addr < end) {
+        if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0) return FALSE;
+        if (mbi.State != MEM_COMMIT) return FALSE;
+        if (mbi.Protect & unreadable) return FALSE;
+        if (!(mbi.Protect & readable)) return FALSE;
+        addr = (const char*)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return TRUE;
+}
+
+/* Dynamically determines the correct B-version check instruction RVA in the binary. */
+static DWORD GetBVersionRva(HMODULE mod) {
+    BYTE* base = (BYTE*)mod;
+
+    // 1. Try dynamic fingerprint matching first (from RVA 0x11000 FNV-1a hash)
+    if (SafeProbe(base + 0x11000, 0x1000)) {
+        uint64_t fp = Fnv1a64(base + 0x11000, 0x1000);
+        m2_logf("[*] GetBVersionRva: binary fingerprint = 0x%016llX", fp);
+        if (fp == 0xB79E4DD22A4BFCB3ULL) {
+            m2_logf("[*] GetBVersionRva: matched Retail (v1.1)");
+            return 0x4448E8;
+        } else if (fp == 0x1942B494FF9F4DB3ULL) {
+            m2_logf("[*] GetBVersionRva: matched Bypass (v1.1_bypass)");
+            return 0x444688;
+        }
+    }
+
+    // 2. Fallback heuristic: Probe both known target code offsets for the signature bytes
+    // Pattern: 8B 54 24 18 52 (mov edx, [esp+18h]; push edx)
+    const BYTE kPattern[5] = {0x8B, 0x54, 0x24, 0x18, 0x52};
+
+    if (SafeProbe(base + 0x444688, 5) && memcmp(base + 0x444688, kPattern, 5) == 0) {
+        m2_logf("[*] GetBVersionRva: matched Bypass signature at RVA 0x444688");
+        return 0x444688;
+    }
+    if (SafeProbe(base + 0x4448E8, 5) && memcmp(base + 0x4448E8, kPattern, 5) == 0) {
+        m2_logf("[*] GetBVersionRva: matched Retail signature at RVA 0x4448E8");
+        return 0x4448E8;
+    }
+
+    m2_logf("[!] GetBVersionRva: could not find valid B-version check signature");
+    return 0;
+}
+
+static int PatchBVersion(void) {
+    HMODULE mod = GetModuleHandleA(NULL);
+    if (!mod) {
+        m2_logf("[!] PatchBVersion: Host module not loaded");
+        return 0;
+    }
+    
+    DWORD rva = GetBVersionRva(mod);
+    if (rva == 0) {
+        m2_logf("[!] PatchBVersion: Aborting patch due to unknown binary signature");
+        return 0;
+    }
+    
+    BYTE* target = (BYTE*)mod + rva;
+
+    /* Original instruction bytes: 
+     * 8B 54 24 18     mov edx, [esp+18h]
+     * 52              push edx
+     * 
+     * Target replacement bytes (Push g_target_bversion):
+     * 68 [4 bytes of value]  push imm32
+     */
+    BYTE kPatchPayload[5];
+    kPatchPayload[0] = 0x68; // push imm32
+    memcpy(&kPatchPayload[1], &g_target_bversion, sizeof(g_target_bversion));
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, sizeof(kPatchPayload), PAGE_READWRITE, &oldProtect)) {
+        m2_logf("[!] PatchBVersion: VirtualProtect failed, GLE=%lu", GetLastError());
+        return 0;
+    }
+    
+    memcpy(target, kPatchPayload, sizeof(kPatchPayload));
+    DWORD tmp = 0;
+    VirtualProtect(target, sizeof(kPatchPayload), oldProtect, &tmp);
+
+    m2_logf("[+] B-version check patched to always return %d (VA 0x%p)", g_target_bversion, target);
+    return 1;
+}
+
 /* ------------------------------------------------------------------------ *
  * Hook arming
  * ------------------------------------------------------------------------ */
@@ -382,19 +425,23 @@ static int HookApi(const char* module, const char* fn,
     HMODULE m = GetModuleHandleA(module);
     if (!m) m = LoadLibraryA(module);
     if (!m) {
-        if (required) m2_logf("[!] HookApi: module %s not loadable", module);
+        if (required) {
+            m2_logf("[!] HookApi: failed to load module %s", module);
+        }
         return 0;
     }
-    void* target = (void*)GetProcAddress(m, fn);
-    if (!target) {
-        if (required) m2_logf("[!] HookApi: %s!%s not found", module, fn);
+    void* p = (void*)GetProcAddress(m, fn);
+    if (!p) {
+        if (required) {
+            m2_logf("[!] HookApi: export %s not found in %s", fn, module);
+        }
         return 0;
     }
-    if (!m2_hook_attach(target, detour, orig)) {
-        m2_logf("[!] m2_hook_attach failed for %s!%s", module, fn);
+    if (m2_hook_attach(p, detour, orig) == 0) {
+        m2_logf("[!] HookApi: failed to attach hook for %s!%s", module, fn);
         return 0;
     }
-    m2_logf("[*] hooked %s!%s -> %p", module, fn, detour);
+    m2_logf("[*] hooked %s!%s -> %p", module, fn, p);
     return 1;
 }
 
@@ -402,6 +449,14 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
     (void)arg;
 
     LoadConfig();
+
+    /* 1. Apply B-version patch immediately to beat the connection initialization race condition */
+    if (g_patch_bversion) {
+        PatchBVersion();
+    } else {
+        m2_logf("[*] B-version patch disabled by config");
+    }
+
     if (g_hook_dns) {
         ResolveServer();
     } else {
@@ -413,7 +468,7 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         return 1;
     }
 
-    /* 1. DNS redirect. */
+    /* 2. DNS redirect. */
     if (g_hook_dns) {
         HookApi("ws2_32.dll", "gethostbyname",   (void*)d_gethostbyname,   (void**)&o_gethostbyname,   1);
         HookApi("ws2_32.dll", "getaddrinfo",     (void*)d_getaddrinfo,     (void**)&o_getaddrinfo,     1);
@@ -422,30 +477,7 @@ static DWORD WINAPI WorkerThread(LPVOID arg) {
         m2_logf("[*] DNS redirect hook disabled by config");
     }
 
-    /* 2. Cert blob blindfold. */
-    if (g_hook_cert) {
-        HookApi("wintrust.dll", "WinVerifyTrust", (void*)d_winverifytrust, (void**)&o_winverifytrust, 1);
-    } else {
-        m2_logf("[*] WinVerifyTrust hook disabled by config");
-    }
-
-    /* 3. Time spoof. */
-    if (g_spoof_clock) {
-        HookApi("kernel32.dll", "GetSystemTime",            (void*)d_GetSystemTime,            (void**)&o_GetSystemTime,            1);
-        HookApi("kernel32.dll", "GetLocalTime",             (void*)d_GetLocalTime,             (void**)&o_GetLocalTime,             1);
-        HookApi("kernel32.dll", "GetSystemTimeAsFileTime",  (void*)d_GetSystemTimeAsFileTime,  (void**)&o_GetSystemTimeAsFileTime,  1);
-        const char* crt[] = { "msvcrt.dll", "msvcr80.dll", "msvcr90.dll" };
-        for (size_t i = 0; i < sizeof(crt) / sizeof(crt[0]); ++i) {
-            HookApi(crt[i], "time",    (void*)d_time,    NULL, 0);
-            HookApi(crt[i], "_time32", (void*)d_time32,  NULL, 0);
-            HookApi(crt[i], "_time64", (void*)d_time64,  NULL, 0);
-        }
-        m2_logf("[*] clock spoof active: %04d-%02d-%02d", SPOOF_YEAR, SPOOF_MONTH, SPOOF_DAY);
-    } else {
-        m2_logf("[*] clock spoof disabled by config");
-    }
-
-    /* 4. FESL CA pubkey patch — runs after hooks so any logging from
+    /* 3. FESL CA pubkey patch — runs after hooks so any logging from
      *    the wait loop goes through the live logger. */
     if (g_patch_ca) {
         PatchFeslCAKey();
